@@ -49,9 +49,12 @@
 /* Commands to be used to stick into the 'PRINTER_JobItem.command' fields of the */
 #define PRINTER_CMD_STANDBY				0x00
 #define PRINTER_CMD_PRINT_LINE				0x01
-#define PRINTER_CMD_ADVANCE_LINE			0x02
 #define PRINTER_CMD_CUT_PAPER				0x03
 #define PRINTER_CMD_HALT_ALL				0xFF
+
+#define PRINTER_CMD_ADVANCE_LINE			'\r'
+#define PRINTER_CMD_MOTOR_ENGAGE			'B'
+#define PRINTER_CMD_MOTOR_IDLE				'E'
 
 /* Define how long an actual printed line is */
 #define PRINTER_DOTS_PER_LINE				384
@@ -78,11 +81,10 @@ static uint32_t pngImageWidth, pngImageHeight;
 static png_bytep *pngImageRowPointers;
 
 /* Function prototypes */
-static bool sendJob(PRINTER_JobItem *currentItem);
 static bool printImage(void);
 static bool readPngImage(const char *fileName);
 static void deallocPngImage(void);
-static void PrintLine(const png_bytep * rowPtr);
+static void PrintLine(FILE* ofp, const png_byte *rowPtr);
 
 /* Main Linux program entry point */
 int main(int argc, char * const argv[])
@@ -116,24 +118,15 @@ int main(int argc, char * const argv[])
 /*
  * Sends 1 line of data (64 Bytes), 384 dots (bits).
  */
-static bool sendJob(PRINTER_JobItem * currentItem) {
-	FILE *ofp;
-	char outputFilename[] = "/dev/ftp628";
+static bool sendJob(FILE* ofp, PRINTER_JobItem * currentItem) {
+	fwrite(currentItem->data, sizeof(uint8_t), currentItem->length, ofp);
+	fflush(ofp);
+	return true;
+}
 
-	ofp = fopen(outputFilename, "w");
-	if (ofp == NULL) {
-		printf("ERROR: couldn't open device");
-		exit(EXIT_FAILURE);
-	}
-
-	if (currentItem->command == PRINTER_CMD_ADVANCE_LINE) {
-		char buf = '\r';
-		fwrite(&buf, sizeof(uint8_t), sizeof(buf), ofp);
-	} else {
-		fwrite(currentItem->data, sizeof(uint8_t), currentItem->length, ofp);
-	}
-
-	fclose(ofp);
+static bool sendCmd(FILE* ofp, char cmd) {
+	fwrite(&cmd, sizeof(char), 1, ofp);
+	fflush(ofp);
 	return true;
 }
 
@@ -142,15 +135,20 @@ static bool sendJob(PRINTER_JobItem * currentItem) {
  * sends them to device.
  */
 static bool printImage(void) {
-	png_bytep * rowPtr;
+	png_bytep rowPtr;
 	int lineCount;
 	int i;
+	FILE* ofp;
 
-	PRINTER_JobItem * advancePaperItem;
-	advancePaperItem = (PRINTER_JobItem *) malloc(sizeof(PRINTER_JobItem) + 0);
-	advancePaperItem->command = PRINTER_CMD_ADVANCE_LINE;
-	advancePaperItem->length = 0;
+	char outputFilename[] = "/dev/ftp628";
 
+	ofp = fopen(outputFilename, "w");
+	if (ofp == NULL) {
+		printf("ERROR: couldn't open device");
+		exit(EXIT_FAILURE);
+	}
+
+	sendCmd(ofp, PRINTER_CMD_MOTOR_ENGAGE);
 	/*
 	 * We are going to step through and process the image and associated
 	 * print jobs/commands one line (row) at a time. We'll use rowPtr to
@@ -158,23 +156,25 @@ static bool printImage(void) {
 	 * ended, we know we are done and ready to cut the paper.
 	 */
 	for(lineCount = 0; lineCount < pngImageHeight; lineCount++) {
-		rowPtr = (png_bytep *)pngImageRowPointers[lineCount];
+		rowPtr = pngImageRowPointers[lineCount];
 
 		/*
 		 * print line on two separate lines, effectively printing each dot
 		 * twice. This increases contrast and fixes aspect ratio issues.
 		 */
-		PrintLine(rowPtr);
-		sendJob(advancePaperItem);
-		PrintLine(rowPtr);
-		sendJob(advancePaperItem);
+		PrintLine(ofp, rowPtr);
+		sendCmd(ofp, PRINTER_CMD_ADVANCE_LINE);
+		PrintLine(ofp, rowPtr);
+		sendCmd(ofp, PRINTER_CMD_ADVANCE_LINE);
 	}
 
 	printf("Advance paper\n");
 	for(i = 0; i < 100; i++) {
-		sendJob(advancePaperItem);
+		sendCmd(ofp, PRINTER_CMD_ADVANCE_LINE);
 	}
 
+	sendCmd(ofp, PRINTER_CMD_MOTOR_IDLE);
+	fclose(ofp);
 	return true;
 }
 
@@ -308,12 +308,27 @@ static void deallocPngImage(void) {
 	pngImageRowPointers = NULL;
 }
 
-static void PrintLine(const png_bytep * rowPtr) {
+static void PrintLine(FILE* ofp, const png_byte *rowPtr) {
+	int i;
 	PRINTER_JobItem * printItem;
+	unsigned char *p;
+	const png_byte *src = rowPtr;
+
 	printItem = (PRINTER_JobItem *) malloc(sizeof(PRINTER_JobItem) + pngImageWidth / 8 * sizeof(uint8_t));
 	printItem->command = PRINTER_CMD_PRINT_LINE;
 	printItem->length = pngImageWidth / 8;
-	/* Tricky working with flexible array member at end of struct, need to use memcpy.*/
-	memcpy(printItem->data, rowPtr, pngImageWidth / 8);
-	sendJob(printItem);
+	p = printItem->data;
+	for (i = 0; i < pngImageWidth / 8; i++) {
+		*p++ = *src++ ^ 0xff;
+	}
+	if (0) {
+		int i;
+
+		src = printItem->data;
+		for (i = 0; i < pngImageWidth / 8; i++) {
+			printf("%02x", src[i]);
+		}
+		printf("\n");
+	}
+	sendJob(ofp, printItem);
 }
