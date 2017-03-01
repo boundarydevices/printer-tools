@@ -48,7 +48,7 @@ $O/%.o : %.c directories
 
 $(TARGET_BIN): $(OBJ_BIN)
 	$P '  LD      $(@F)'
-	$E $(CC) $(LDFLAGS) -lm -lpng $^ -o $@
+	$E $(CC) $(LDFLAGS) $^ -o $@ -lm -lpng
 
 .PHONY : all
 all : $(TARGET_BIN)
