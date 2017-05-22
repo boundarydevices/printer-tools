@@ -37,6 +37,7 @@
  * Modified by Boundary Devices for NXP i.MX demo 20/01/2017
  */
 
+#include <errno.h>
 #include <png.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -90,6 +91,7 @@ static void PrintLine(FILE* ofp, const png_byte *rowPtr);
 int main(int argc, char * const argv[])
 {
 	char opt;
+	int ret = EXIT_SUCCESS;
 
 	/*
 	 * Parse the command line options and issue a simple error text in case
@@ -109,10 +111,12 @@ int main(int argc, char * const argv[])
 		return EXIT_FAILURE;
 	}
 	readPngImage(argv[2]);
-	printImage();
-	printf("Image printed\n");
+	if (printImage())
+		printf("Image printed\n");
+	else
+		ret = EXIT_FAILURE;
 	deallocPngImage();
-	return EXIT_SUCCESS;
+	return ret;
 }
 
 /*
@@ -125,8 +129,24 @@ static bool sendJob(FILE* ofp, PRINTER_JobItem * currentItem) {
 }
 
 static bool sendCmd(FILE* ofp, char cmd) {
-	fwrite(&cmd, sizeof(char), 1, ofp);
-	fflush(ofp);
+	int rval;
+
+	rval = fwrite(&cmd, sizeof(char), 1, ofp);
+	if (rval != 1) {
+		perror("fwrite error");
+		fflush(ofp);
+		return false;
+	}
+	rval = fflush(ofp);
+	if (rval) {
+		if (errno == EFAULT)
+			printf("Motor fault!\n");
+		else if (errno == ENOSPC)
+			printf("Paper is out!\n");
+		else
+			printf("(%d)(%d)Couldn't move motors\n", rval, errno);
+		return false;
+	}
 	return true;
 }
 
@@ -136,6 +156,7 @@ static bool sendCmd(FILE* ofp, char cmd) {
  */
 static bool printImage(void) {
 	png_bytep rowPtr;
+	bool ret;
 	int lineCount;
 	int i;
 	FILE* ofp;
@@ -163,19 +184,22 @@ static bool printImage(void) {
 		 * twice. This increases contrast and fixes aspect ratio issues.
 		 */
 		PrintLine(ofp, rowPtr);
-		sendCmd(ofp, PRINTER_CMD_ADVANCE_LINE);
+		if (!(ret = sendCmd(ofp, PRINTER_CMD_ADVANCE_LINE)))
+			goto end;
 		PrintLine(ofp, rowPtr);
-		sendCmd(ofp, PRINTER_CMD_ADVANCE_LINE);
+		if (!(ret = sendCmd(ofp, PRINTER_CMD_ADVANCE_LINE)))
+			goto end;
 	}
 
 	printf("Advance paper\n");
 	for(i = 0; i < 100; i++) {
-		sendCmd(ofp, PRINTER_CMD_ADVANCE_LINE);
+		if (!(ret = sendCmd(ofp, PRINTER_CMD_ADVANCE_LINE)))
+			goto end;
 	}
-
+end:
 	sendCmd(ofp, PRINTER_CMD_MOTOR_IDLE);
 	fclose(ofp);
-	return true;
+	return ret;
 }
 
 static bool readPngImage(const char *fileName) {
